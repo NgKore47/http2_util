@@ -10,6 +10,8 @@ package http2_util
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -34,8 +36,53 @@ func curveIDToString(id tls.CurveID) string {
 		return "X25519-Kyber768-Draft00"
 	case tls.P256Kyber768Draft00:
 		return "P256-Kyber768-Draft00"
+	case tls.MLKEM768:
+		return "MLKEM768"
+	case tls.SecP256r1MLKEM768:
+		return "SecP256r1MLKEM768"
+	case tls.X25519MLKEM768:
+		return "X25519MLKEM768"
 	default:
-		return fmt.Sprintf("Unknown Curve ID: %d", id)
+		return ""
+	}
+}
+
+func printTLSHandshakeCipherSuite(conn *tls.Conn) {
+	state := conn.ConnectionState()
+	if state.HandshakeComplete {
+		fmt.Printf("Handshake finished.\n")
+		cipherSuite := tls.CipherSuiteName(state.CipherSuite)
+		fmt.Printf("TLS version : %s\n", state.Version)
+		fmt.Printf("Cipher Suite chosen : %s\n", cipherSuite)
+		fmt.Printf("Negotiated protocol : %s\n", state.NegotiatedProtocol)
+		fmt.Println()
+	} else {
+
+		err := conn.Handshake()
+		if err != nil {
+			log.Fatalf("Handshake not completed, Error: %s\n", err)
+		} else {
+
+			state := conn.ConnectionState()
+
+			log.Println("Handshake done, Error: nil.")
+			cipherSuite := tls.CipherSuiteName(state.CipherSuite)
+			fmt.Printf("TLS version : %d\n", state.Version)
+			fmt.Printf("Cipher Suite chosen : %s\n", cipherSuite)
+			fmt.Printf("Negotiated protocol : %s\n", state.NegotiatedProtocol)
+		}
+	}
+}
+
+func serverConnStateHandler(conn net.Conn, state http.ConnState) {
+	if state == http.StateNew {
+		tlsConn, ok := conn.(*tls.Conn)
+		if ok {
+			fmt.Println("New PQ TLS connection established.")
+			printTLSHandshakeCipherSuite(tlsConn)
+		}
+	} else if state == http.StateClosed {
+		fmt.Println("Connection closed.")
 	}
 }
 
@@ -52,8 +99,9 @@ func NewServer(bindAddr string, preMasterSecretLogPath string, handler http.Hand
 		IdleTimeout: 1 * time.Millisecond,
 	}
 	server = &http.Server{
-		Addr:    bindAddr,
-		Handler: h2c.NewHandler(handler, h2Server),
+		Addr:      bindAddr,
+		Handler:   h2c.NewHandler(handler, h2Server),
+		ConnState: serverConnStateHandler,
 	}
 
 	if preMasterSecretLogPath != "" {
@@ -71,40 +119,53 @@ func NewServer(bindAddr string, preMasterSecretLogPath string, handler http.Hand
 			GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 
 				if len(server.TLSConfig.Certificates) == 0 {
-					fmt.Println("No certs")
+					fmt.Println("No certificates found for the SERVER.")
 					return nil, err
 				}
-				fmt.Println("Cert found!")
+				fmt.Println("SERVER Certificate found.")
+				fmt.Printf("\nNo. of Server Certificate(s): %d\n", len(server.TLSConfig.Certificates))
+
 				return &server.TLSConfig.Certificates[0], nil
 
 			},
-			CurvePreferences: []tls.CurveID{
+			CurvePreferences: []tls.CurveID{tls.MLKEM768, tls.X25519MLKEM768, tls.SecP256r1MLKEM768,
 				tls.X25519Kyber768Draft00, tls.X25519, tls.CurveP256},
 			GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 
 				fmt.Println(strings.Repeat("-", 30))
-				fmt.Println("Client Details:\n")
-				fmt.Printf("\tClient connected to: %s\n", chi.ServerName)
+				fmt.Println("Connection Details:\n")
 
-				fmt.Print("\tSupported Signature Schemes: ")
+				fmt.Printf("\t1. Client Connected to: %s\n", chi.ServerName)
+
+				fmt.Print("\t2. Client Supported Signature Schemes: ")
 				for _, sigScheme := range chi.SignatureSchemes {
-					fmt.Printf("\t\t%+v ", sigScheme)
+					fmt.Printf("\t\t%+v", sigScheme)
 				}
 				fmt.Println()
 
 				// Print the supported curves
-				fmt.Println("\tSupported Curves: ")
+				fmt.Println("\t3. Client Supported Curves: ")
 				for _, curve := range chi.SupportedCurves {
-					fmt.Printf("\t\t%+v ", curve)
+					curveString := curveIDToString(curve)
+					if curveString == "" {
+						fmt.Printf("\t\t•%+v\n", curve)
+					} else {
+						fmt.Printf("\t\t•%s\n", curveIDToString(curve))
+
+					}
 				}
 				fmt.Println()
 
-				fmt.Println("\tCurve Preferences: ")
+				fmt.Println("\t4. Curve Preferences: ")
 				for _, curve := range server.TLSConfig.CurvePreferences {
-					fmt.Printf("\t\t%s\n", curveIDToString(curve))
-				}
-				fmt.Printf("\nServer Certificates: %d\n", len(server.TLSConfig.Certificates))
+					curveString := curveIDToString(curve)
+					if curveString == "" {
+						fmt.Printf("\t\t•%s\n", curve)
+					} else {
+						fmt.Printf("\t\t•%s\n", curveIDToString(curve))
 
+					}
+				}
 				return server.TLSConfig, nil
 
 			},
